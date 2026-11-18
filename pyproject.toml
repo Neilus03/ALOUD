@@ -1,0 +1,60 @@
+[build-system]
+requires = ["setuptools>=77,<85"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "aloud-macos"
+version = "0.1.0"
+description = "A macOS reader for listening to research papers and following along on the PDF."
+readme = "README.md"
+requires-python = ">=3.12,<3.13"
+license = "AGPL-3.0-only"
+license-files = ["LICENSE", "licenses/*.txt"]
+classifiers = [
+    "Environment :: MacOS X",
+    "Operating System :: MacOS :: MacOS X",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Multimedia :: Sound/Audio :: Speech",
+]
+dependencies = [
+    "beautifulsoup4>=4.12,<5",
+    "en-core-web-sm @ https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-3.8.0/en_core_web_sm-3.8.0-py3-none-any.whl",
+    "kokoro==0.9.4",
+    "latex2mathml>=3.81,<4",
+    "lxml>=5,<7",
+    "markdown-it-py>=4,<5",
+    "numpy>=1.26,<3",
+    "pillow>=10,<13",
+    # A newer preshed wheel can overflow when spaCy loads the English model on macOS.
+    "preshed==3.0.9",
+    "pymupdf>=1.26,<2",
+    "pyobjc-framework-Cocoa>=12,<13",
+    "pyobjc-framework-MediaPlayer>=12,<13",
+    "pyobjc-framework-Quartz>=12,<13",
+    "pyobjc-framework-Vision>=12,<13",
+    "pyobjc-framework-WebKit>=12,<13",
+    "pywebview>=6.2,<7",
+    "requests>=2.32,<3",
+    "soundfile>=0.13,<1",
+    "spacy>=3.8.16,<3.9",
+    "torch>=2.6,<3",
+    "trafilatura>=2.3,<3",
+]
+
+[project.optional-dependencies]
+equation-ocr = ["rapid-latex-ocr==0.0.9"]
+piper = ["piper-tts>=1.8,<2"]
+
+[project.scripts]
+aloud = "aloud.__main__:main"
+aloud-quick-action = "aloud.tools.install_service:main"
+
+[tool.setuptools]
+packages = ["aloud", "aloud.tools"]
+include-package-data = false
+
+[tool.setuptools.package-data]
+aloud = ["assets/*", "web/*", "web/vendor/**/*", "vendor/**/*"]
+
+[tool.uv]
+environments = ["sys_platform == 'darwin' and platform_machine == 'arm64'"]

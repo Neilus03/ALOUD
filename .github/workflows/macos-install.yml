@@ -1,0 +1,29 @@
+name: macOS install
+
+on: [push, pull_request, workflow_dispatch]
+
+permissions:
+  contents: read
+
+jobs:
+  install:
+    runs-on: macos-15
+    timeout-minutes: 15
+    env:
+      ALOUD_INSTALL_DIR: ${{ runner.temp }}/aloud
+      ALOUD_APPS_DIR: ${{ runner.temp }}/Applications
+      ALOUD_DATA_DIR: ${{ runner.temp }}/aloud-data
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2
+        with:
+          cache-dependency-glob: requirements-macos-arm64.txt
+      - name: Install ALOUD
+        run: sh scripts/install.sh
+      - name: Verify launcher and PDF processing
+        run: |
+          "$ALOUD_INSTALL_DIR/venv/bin/aloud" --version
+          "$ALOUD_INSTALL_DIR/venv/bin/python" scripts/smoke-test.py
+          plutil -lint "$ALOUD_APPS_DIR/ALOUD.app/Contents/Info.plist"
