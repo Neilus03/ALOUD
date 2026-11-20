@@ -1,4 +1,4 @@
-"""Kokoro synthesis with word timings, a priority queue and a disk cache."""
+"""Local speech synthesis with word timings, a priority queue and a disk cache."""
 import hashlib
 import heapq
 import io
@@ -14,13 +14,15 @@ import soundfile as sf
 
 from .extract_doc import spoken_text
 from .paths import SUPPORT
+from .pocket import ALBA, AlbaVoice
 
 SR = 24000
 REPO = "hexgrad/Kokoro-82M"
 
 VOICES = [
-    # id, label, grade (from Kokoro's VOICES.md)
+    # id, label, grade (where published in Kokoro's VOICES.md)
     ("af_heart", "Heart · US female", "A"),
+    (ALBA, "Alba · Pocket TTS", ""),
     ("af_bella", "Bella · US female", "A-"),
     ("af_lessac", "Lessac · US female, expressive (questions rise)", "P"),
     ("af_nicole", "Nicole · US female, soft", "B-"),
@@ -119,6 +121,7 @@ class Engine:
         self._jobs = {}       # key -> dict(event, job, result, error)
         self._model = None
         self._pipes = {}
+        self._alba = None
         self.ready = threading.Event()
         threading.Thread(target=self._worker, daemon=True, name="tts").start()
 
@@ -126,7 +129,11 @@ class Engine:
     @staticmethod
     def key_for(text, spans, voice, pause=0.35):
         spoken, _ = spoken_text(text, spans or [])
-        ver = "v4p3" if voice in PIPER_MODELS else "v4"   # bump when a voice's timing method changes
+        # Keep existing cached clips when only another engine changes.
+        if voice == ALBA:
+            ver = "alba-18m-refl-v1"
+        else:
+            ver = "v4p3" if voice in PIPER_MODELS else "v4"
         return hashlib.sha1(f"{ver}|{voice}|{spoken}|{pause}".encode()).hexdigest()[:20]
 
     def cached(self, key):
@@ -146,7 +153,7 @@ class Engine:
             return key
         with self._cv:
             job = self._jobs.get(key)
-            if job is None:
+            if job is None or (job["event"].is_set() and job["error"] is not None):
                 job = self._jobs[key] = dict(event=threading.Event(), prio=priority, error=None,
                                              args=(text, spans, voice, pause))
             elif job["event"].is_set():
@@ -170,8 +177,13 @@ class Engine:
         return self.cached(key)
 
     def audio(self, key, clean=True):
+        return wav_bytes(self.pcm(key, clean))
+
+    def pcm(self, key, clean=True):
         data, _ = sf.read(self.cache / f"{key}.wav", dtype="float32")
-        return wav_bytes(finish(data, clean))
+        meta = self.cached(key) or {}
+        # Alba keeps its natural tone. The clean-up EQ was tuned for Kokoro.
+        return finish(data, clean and meta.get("voice") != ALBA)
 
     def drop_prefetch(self):
         """Forget queued low-priority work (e.g. after the user jumps elsewhere)."""
@@ -278,35 +290,18 @@ class Engine:
         return chunks, words
 
     def _synth(self, key, text, spans, voice, pause):
-        spoken, pieces = spoken_text(text, spans or [])
-        chunks, words, offset, cursor = [], [], 0.0, 0
-        if voice in PIPER_MODELS:
-            if spoken.strip():
-                chunks, words = self._synth_piper(spoken, voice)
-            spoken = ""                      # skip the Kokoro path below
-        else:
-            pipe = self._pipe(voice)
+        spoken, _ = spoken_text(text, spans or [])
+        chunks, words = [], []
         if spoken.strip():
-            for r in pipe(spoken, voice=voice, speed=1.0, split_pattern=None):
-                if r.audio is None:
-                    continue
-                a = r.audio.detach().cpu().numpy().astype(np.float32)
-                if not r.tokens and r.pred_dur is not None:      # non-English: no token timings
-                    est, cursor = _timings_from_durations(r, spoken, cursor)
-                    words += [[s, e, round(offset + t0, 3), round(offset + t1, 3)] for s, e, t0, t1 in est]
-                for t in r.tokens or []:
-                    tt = (t.text or "").strip()
-                    if not tt:
-                        continue
-                    pos = spoken.find(tt, cursor)
-                    if pos < 0 or pos - cursor > 200:
-                        continue
-                    cursor = pos + len(tt)
-                    if t.start_ts is None or t.end_ts is None or not any(c.isalnum() for c in tt):
-                        continue
-                    words.append([pos, pos + len(tt), round(offset + t.start_ts, 3), round(offset + t.end_ts, 3)])
-                chunks.append(a)
-                offset += len(a) / SR
+            if voice == ALBA:
+                if self._alba is None:
+                    self._alba = AlbaVoice()
+                audio, words = self._alba.synthesize(spoken)
+                chunks = [audio]
+            elif voice in PIPER_MODELS:
+                chunks, words = self._synth_piper(spoken, voice)
+            else:
+                chunks, words = self._synth_kokoro(spoken, voice)
         audio = np.concatenate(chunks) if chunks else np.zeros(0, np.float32)
         # trim the model's own padding so pauses between passages are ours and consistent
         lead = tail = 0
@@ -321,8 +316,32 @@ class Engine:
         words = [[a, b, round(max(0.0, t0 - shift), 3), round(max(0.0, t1 - shift), 3)] for a, b, t0, t1 in words]
         audio = np.concatenate([audio, np.zeros(int(pause * SR), np.float32)])
         sf.write(self.cache / f"{key}.wav", audio, SR, subtype="FLOAT")
-        meta = dict(key=key, dur=round(len(audio) / SR, 3), words=words)
+        meta = dict(key=key, dur=round(len(audio) / SR, 3), words=words, voice=voice)
         (self.cache / f"{key}.json").write_text(json.dumps(meta))
+
+    def _synth_kokoro(self, spoken, voice):
+        chunks, words, offset, cursor = [], [], 0.0, 0
+        for r in self._pipe(voice)(spoken, voice=voice, speed=1.0, split_pattern=None):
+            if r.audio is None:
+                continue
+            audio = r.audio.detach().cpu().numpy().astype(np.float32)
+            if not r.tokens and r.pred_dur is not None:      # non-English: no token timings
+                est, cursor = _timings_from_durations(r, spoken, cursor)
+                words += [[s, e, round(offset + t0, 3), round(offset + t1, 3)] for s, e, t0, t1 in est]
+            for t in r.tokens or []:
+                word = (t.text or "").strip()
+                if not word:
+                    continue
+                pos = spoken.find(word, cursor)
+                if pos < 0 or pos - cursor > 200:
+                    continue
+                cursor = pos + len(word)
+                if t.start_ts is None or t.end_ts is None or not any(c.isalnum() for c in word):
+                    continue
+                words.append([pos, pos + len(word), round(offset + t.start_ts, 3), round(offset + t.end_ts, 3)])
+            chunks.append(audio)
+            offset += len(audio) / SR
+        return chunks, words
 
 
 def _timings_from_durations(r, spoken, cursor):

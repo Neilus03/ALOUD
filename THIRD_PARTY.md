@@ -5,6 +5,8 @@
 | PDF Narrator upstream code | [Original MIT notice](licenses/upstream-MIT.txt) |
 | PyMuPDF and MuPDF | GNU AGPLv3 for the open-source distribution. [PyMuPDF licensing](https://pymupdf.io/licensing) |
 | Kokoro and Kokoro-82M | Apache 2.0. Weights download when first used. [Kokoro-82M](https://huggingface.co/hexgrad/Kokoro-82M) |
+| Pocket TTS and Alba | Kyutai's [MIT-licensed inference code](https://github.com/kyutai-labs/pocket-tts/tree/v4.0.1) and [CC BY 4.0 model files](https://huggingface.co/kyutai/pocket-tts-without-voice-cloning) for the English 18.2M reward fine-tuned model and Alba preset. |
+| CavaAlign v1 | [Cava Reader's aligner code, configuration, and ONNX model](https://huggingface.co/cava-reader/cavaalign-v1), licensed under [GNU AGPL v3 or later](aloud/vendor/cavaalign/LICENSE). |
 | KaTeX | [Bundled MIT license](aloud/web/vendor/katex/LICENSE) |
 | Speech Rule Engine | [Bundled Apache 2.0 license](aloud/vendor/sre/LICENSE) |
 | xmldom | [Bundled license](aloud/vendor/sre/xmldom/LICENSE) |

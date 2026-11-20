@@ -74,7 +74,7 @@ function buildSettings() {
     }
     const d = document.createElement("div");
     d.className = "voice" + (id === voice() ? " sel" : "");
-    d.innerHTML = `<button class="icon" title="Hear a sample"><svg viewBox="0 0 24 24" fill="currentColor"><path d="M7 4.5v15l13-7.5z"/></svg></button><span class="n">${esc(label)}</span>${lang === "en" ? `<span class="g" title="Quality grade">${grade}</span>` : ""}`;
+    d.innerHTML = `<button class="icon" title="Hear a sample"><svg viewBox="0 0 24 24" fill="currentColor"><path d="M7 4.5v15l13-7.5z"/></svg></button><span class="n">${esc(label)}</span>${lang === "en" && grade ? `<span class="g" title="Quality grade">${grade}</span>` : ""}`;
     d.querySelector("button").onclick = (e) => { e.stopPropagation(); playSample(id, d.querySelector("button")); };
     d.onclick = () => chooseVoice(id);
     v.appendChild(d);

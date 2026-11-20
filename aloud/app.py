@@ -353,12 +353,12 @@ def _safe_name(s, n=60):
 
 
 def export_audiobook(doc, voice, clean):
-    """One AAC file per section in ~/Downloads/<title> (audio)/, synthesised at low priority."""
+    """One audio file per section in ~/Downloads/<title> (audio)/, synthesised at low priority."""
     import subprocess
     import tempfile
     import numpy as np
     import soundfile as sf
-    from .tts import SR, finish
+    from .tts import SR
     folder = Path.home() / "Downloads" / f"{_safe_name(doc['title'])} (audio)"
     folder.mkdir(parents=True, exist_ok=True)
     EXPORT.update(id=doc["id"], done=0, total=len(doc["units"]), folder=str(folder), error=None, running=True, cancel=False)
@@ -380,21 +380,28 @@ def export_audiobook(doc, voice, clean):
                         raise InterruptedError
                     key = para_job(doc, u, voice, 50)
                     try:
-                        meta = ENGINE.wait(key, timeout=600)
+                        if ENGINE.wait(key, timeout=600) is None:
+                            raise TimeoutError("Speech synthesis timed out.")
                         break
-                    except RuntimeError:      # cancelled by a jump in live reading: ask again
-                        continue
-                data, _ = sf.read(ENGINE.cache / f"{key}.wav", dtype="float32")
-                pcm.append(finish(data, clean))
+                    except RuntimeError as error:
+                        if str(error) != "cancelled":
+                            raise
+                pcm.append(ENGINE.pcm(key, clean))
                 EXPORT["done"] += 1
             if not pcm:
                 continue
-            with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
-                sf.write(tmp.name, np.concatenate(pcm), SR, subtype="PCM_16")
-            out = folder / f"{gi + 1:02d} {_safe_name(name)}.m4a"
-            subprocess.run(["/usr/bin/afconvert", "-f", "m4af", "-d", "aac", "-b", "64000", tmp.name, str(out)],
-                           check=True, capture_output=True)
-            os.unlink(tmp.name)
+            with tempfile.TemporaryDirectory(prefix=".aloud-export-", dir=folder) as tmp:
+                wav = Path(tmp) / "chapter.wav"
+                aac = wav.with_suffix(".m4a")
+                sf.write(wav, np.concatenate(pcm), SR, subtype="PCM_16")
+                result = subprocess.run(
+                    ["/usr/bin/afconvert", "-f", "m4af", "-d", "aac", "-b", "64000",
+                     str(wav), str(aac)],
+                    capture_output=True,
+                )
+                # Keep the lossless recording on Macs where the AAC encoder is unavailable.
+                audio_file = aac if result.returncode == 0 else wav
+                audio_file.replace(folder / f"{gi + 1:02d} {_safe_name(name)}{audio_file.suffix}")
     except InterruptedError:
         EXPORT["error"] = "cancelled"
     except Exception as e:
