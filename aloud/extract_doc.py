@@ -381,8 +381,62 @@ def _big_title(d):
     return ""
 
 
-def _norm_title(s):
-    return re.sub(r"[^a-z0-9]+", "", s.lower())
+TOC_PREFIX = re.compile(r"^(?:\d+(?:\.\d+)*|[A-Z](?:\.\d+)*|[IVXLCDM]+)\.?\s+(?=\S)")
+CHAPTER_LABEL = re.compile(r"(chapter|part)\s+(?:\d+|[IVXLCDM]+)", re.I)
+
+
+def _toc_key(text):
+    return _norm(TOC_PREFIX.sub("", _clean_spaces(text)))
+
+
+def _heading_ends(lines, start):
+    """Possible end indices for a heading printed on one or more lines."""
+    first = lines[start]
+    for end in range(start + 1, len(lines) + 1):
+        yield end
+        if end == len(lines):
+            break
+        following = lines[end]
+        gap = following["y0"] - lines[end - 1]["y0"]
+        if (following["col"] != first["col"] or abs(following["size"] - first["size"]) > 0.5
+                or not 0 < gap <= 1.75 * first["size"]):
+            break
+
+
+def _match_toc_heading(lines, start, bookmarks):
+    """Locate a bookmark's title across consecutive lines of the same heading."""
+    key = _toc_key(lines[start]["text"])
+    if not key:
+        return None
+    for end in _heading_ends(lines, start):
+        for index, (_, _, title) in enumerate(bookmarks):
+            if len(key) <= len(title) + 4 and key.endswith(title):
+                return index, end
+        if end == len(lines) or not any(title.startswith(key) for _, _, title in bookmarks):
+            break
+        key += _norm(lines[end]["text"])
+    return None
+
+
+def _chapter_label(lines, index, text, body):
+    """Recognize a printed chapter opener when the outline is missing or abbreviated."""
+    label = CHAPTER_LABEL.fullmatch(text)
+    if label is None or index + 1 == len(lines):
+        return None
+    line, title = lines[index:index + 2]
+    if (line["col"] == title["col"] and line["bold"] and title["bold"]
+            and min(line["size"], title["size"]) >= 1.2 * body
+            and 0 < title["y0"] - line["y0"] <= 3 * line["size"]):
+        return label[1].lower()
+    return None
+
+
+def _edge_key(line, height, body):
+    text = _clean_spaces(line["text"])
+    if (line["y0"] < 0.08 * height or line["y1"] > 0.92 * height
+            or (line["y0"] < 0.12 * height and line["size"] <= body and not line["bold"] and text.isupper())):
+        return re.sub(r"\s*\d+\s*", "#", text)
+    return None
 
 
 SKIP_SECTION = re.compile(
@@ -566,14 +620,14 @@ def extract_pdf(path, converted=False):
     # repeated header/footer lines
     edge_text = Counter()
     for H, lines in pages:
-        for r in lines:
-            if r["y0"] < 0.08 * H or r["y1"] > 0.92 * H:
-                edge_text[re.sub(r"\d+", "#", _clean_spaces(r["text"]))] += 1
-    repeated = {t for t, c in edge_text.items() if c >= max(3, len(pages) // 4)}
+        edge_text.update({key for r in lines if (key := _edge_key(r, H, body))})
+    repeated = {t for t, c in edge_text.items() if c >= 3}
 
     toc_by_page = {}
     for lvl, t, pg in toc:
-        toc_by_page.setdefault(pg - 1, []).append((lvl, t))
+        key = _toc_key(t)
+        if key:
+            toc_by_page.setdefault(pg - 1, []).append((lvl, t, key))
 
     # line spacing within paragraphs, and each column's left/right edges
     gaps = []
@@ -609,27 +663,33 @@ def extract_pdf(path, converted=False):
     for pno, (H, lines) in enumerate(pages):
         pending_toc = list(toc_by_page.get(pno, []))
         buf, buf_kind, prev = [], None, None
-        for r in lines:
+        heading_end = 0
+        for line_index, r in enumerate(lines):
+            if line_index < heading_end:
+                continue
             t = _clean_spaces(r["text"])
-            key = re.sub(r"\d+", "#", t)
             # page furniture
-            if (r["y0"] < 0.08 * H or r["y1"] > 0.92 * H) and (key in repeated or re.fullmatch(r"[\divxlc]+", t)):
+            edge = _edge_key(r, H, body)
+            if edge and (edge in repeated or re.fullmatch(r"[\divxlc]+", t)):
                 furn[pno].append([round(r["x0"], 1), round(r["y0"], 1), round(r["x1"], 1), round(r["y1"], 1)])
                 continue
-            # headings from TOC
-            nt = _norm_title(re.sub(r"^[\dA-Z]?(\.\d+)*\.?\s+", "", t))
-            hit = None
-            for i, (lvl, tt) in enumerate(pending_toc):
-                ntt = _norm_title(re.sub(r"^[\dA-Z]?(\.\d+)*\.?\s+", "", tt))
-                if ntt and (nt == ntt or (nt.endswith(ntt) and len(nt) - len(ntt) <= 4)):
-                    hit = (i, lvl, tt)
-                    break
-            if hit is not None:
+            # A printed chapter opener also ends the previous chapter's references.
+            chapter = _chapter_label(lines, line_index, t, body) if not converted else None
+            heading_start = line_index + bool(chapter)
+            hit = _match_toc_heading(lines, heading_start, pending_toc) if pending_toc else None
+            if hit is not None or chapter:
                 flush(buf, buf_kind); buf, prev = [], None
-                pending_toc.pop(hit[0])
-                paras.append(dict(kind="h", level=hit[1], text=hit[2], page=pno + 1, lines=[r]))
+                if hit is not None:
+                    toc_index, heading_end = hit
+                    level, title_text, _ = pending_toc.pop(toc_index)
+                else:
+                    heading_end = max(_heading_ends(lines, heading_start))
+                    level = 1 if chapter == "part" else 2
+                    title_text = _join_lines([q["text"] for q in lines[heading_start:heading_end]])
+                paras.append(dict(kind="h", level=level, text=title_text, page=pno + 1,
+                                  lines=lines[heading_start:heading_end]))
                 continue
-            if hit is None and not r["fig"] and re.fullmatch(r"(Abstract|Acknowledge?ments?|Appendix|Supplementary Material)", t, re.I):
+            if not r["fig"] and re.fullmatch(r"(Abstract|Acknowledge?ments?|Appendix|Supplementary Material)", t, re.I):
                 flush(buf, buf_kind); buf, prev = [], None
                 paras.append(dict(kind="h", level=1, text=t, page=pno + 1, lines=[r]))
                 continue
@@ -688,7 +748,7 @@ def extract_pdf(path, converted=False):
 
     # back-matter sections nobody wants read aloud are treated like the reference list
     for p in paras:
-        if p["kind"] == "h" and SKIP_SECTION.match(re.sub(r"^[\dA-Z]?(\.\d+)*\.?\s+", "", p["text"].strip())):
+        if p["kind"] == "h" and SKIP_SECTION.match(TOC_PREFIX.sub("", p["text"].strip())):
             p["refs"] = True
         elif p["kind"] == "p" and SKIP_LINE.match(p["text"]):
             p["kind"] = "skip"
